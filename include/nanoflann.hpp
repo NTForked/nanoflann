@@ -1332,8 +1332,8 @@ class KDTreeBaseClass
         /* Which child branch should be taken first? */
         Dimension    idx   = node->node_type.sub.divfeat;
         ElementType  val   = vec[idx];
-        DistanceType diff1 = val - node->node_type.sub.divlow;
-        DistanceType diff2 = val - node->node_type.sub.divhigh;
+        DistanceType diff1 = detail::diff_as<DistanceType>(val, node->node_type.sub.divlow);
+        DistanceType diff2 = detail::diff_as<DistanceType>(val, node->node_type.sub.divhigh);
 
         NodePtr      bestChild;
         NodePtr      otherChild;
@@ -1430,8 +1430,8 @@ class KDTreeBaseClass
         Derived& obj, NodePtr node, const Dimension cutfeat, const BoundingBox& left_bbox,
         const BoundingBox& right_bbox, BoundingBox& bbox)
     {
-        node->node_type.sub.divlow  = left_bbox[cutfeat].high;
-        node->node_type.sub.divhigh = right_bbox[cutfeat].low;
+        node->node_type.sub.divlow  = static_cast<DistanceType>(left_bbox[cutfeat].high);
+        node->node_type.sub.divhigh = static_cast<DistanceType>(right_bbox[cutfeat].low);
 
         const Dimension dims = static_cast<Dimension>(veclen(obj));
         for (Dimension i = 0; i < dims; ++i)
@@ -1544,30 +1544,35 @@ class KDTreeBaseClass
         const Dimension dims = static_cast<Dimension>(veclen(obj));
         const auto      EPS  = static_cast<DistanceType>(0.00001);
 
+        // Spans, spreads and the split value below are all computed in
+        // DistanceType, which detail::checked_distance_type guarantees to be
+        // signed: a difference of two ElementType coordinates wraps around for
+        // unsigned types, and overflows for signed ones as soon as the data
+        // spans most of the range of a narrow integer type.
+
         // Pre-compute max_span once
-        ElementType max_span = bbox[0].high - bbox[0].low;
+        DistanceType max_span = detail::diff_as<DistanceType>(bbox[0].high, bbox[0].low);
         for (Dimension i = 1; i < dims; ++i)
         {
-            ElementType span = bbox[i].high - bbox[i].low;
+            const DistanceType span = detail::diff_as<DistanceType>(bbox[i].high, bbox[i].low);
             if (span > max_span) max_span = span;
         }
 
         // Two-pass: first find max_span (done above), then scan candidate dims
         // inline — no heap allocation for a candidates vector.
-        // Note: `max_spread` must not be seeded with a negative sentinel:
-        // ElementType may be unsigned (e.g. uint8_t), where -1 wraps around to
-        // the largest representable value and no dimension is ever selected,
-        // leaving a degenerate cut that breaks the partition below. A flag for
-        // the first candidate keeps this selection type-agnostic.
-        cutfeat                      = 0;
-        bool              first      = true;
-        ElementType       max_spread = 0;
-        ElementType       min_elem = 0, max_elem = 0;
-        const ElementType threshold = static_cast<ElementType>((1 - EPS) * max_span);
+        // Note: `max_spread` must not be seeded with a negative sentinel, which
+        // wraps around for unsigned types and is not even constructible for a
+        // user-defined scalar DistanceType. A flag for the first candidate keeps
+        // this selection type-agnostic.
+        cutfeat                       = 0;
+        bool               first      = true;
+        DistanceType       max_spread = DistanceType();
+        ElementType        min_elem = 0, max_elem = 0;
+        const DistanceType threshold = (1 - EPS) * max_span;
 
         for (Dimension dim = 0; dim < dims; ++dim)
         {
-            if (bbox[dim].high - bbox[dim].low < threshold) continue;
+            if (detail::diff_as<DistanceType>(bbox[dim].high, bbox[dim].low) < threshold) continue;
 
             ElementType local_min = dataset_get(obj, vAcc_[ind], dim);
             ElementType local_max = local_min;
@@ -1594,7 +1599,7 @@ class KDTreeBaseClass
                 local_max       = std::max(local_max, val);
             }
 
-            const ElementType spread = local_max - local_min;
+            const DistanceType spread = detail::diff_as<DistanceType>(local_max, local_min);
             if (first || spread > max_spread)
             {
                 first      = false;
@@ -1607,12 +1612,11 @@ class KDTreeBaseClass
 
         // Median-of-three for better balance. The midpoint is computed as
         // `low + (high - low) / 2` rather than `(low + high) / 2`, since the
-        // latter overflows whenever ElementType is a wide integer type
-        // (e.g. two large uint32_t coordinates wrap around when added).
-        const ElementType lo = bbox[cutfeat].low;
-        const ElementType hi = bbox[cutfeat].high;
+        // latter overflows as soon as both coordinates are large.
+        const DistanceType lo = static_cast<DistanceType>(bbox[cutfeat].low);
+        const DistanceType hi = static_cast<DistanceType>(bbox[cutfeat].high);
 
-        DistanceType split_val = static_cast<DistanceType>(lo + (hi - lo) / 2);
+        DistanceType split_val = lo + (hi - lo) / 2;
         if (split_val < static_cast<DistanceType>(min_elem))
             split_val = static_cast<DistanceType>(min_elem);
         if (split_val > static_cast<DistanceType>(max_elem))
@@ -1650,7 +1654,11 @@ class KDTreeBaseClass
 
         while (mid < right)
         {
-            const ElementType val = dataset_get(obj, vAcc_[ind + mid], cutfeat);
+            // Compared in DistanceType, like every other coordinate-vs-cutval
+            // comparison, so that a wide unsigned ElementType is not converted
+            // the other way around.
+            const DistanceType val =
+                static_cast<DistanceType>(dataset_get(obj, vAcc_[ind + mid], cutfeat));
 
             if (val < cutval)
             {

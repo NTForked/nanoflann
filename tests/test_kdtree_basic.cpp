@@ -275,11 +275,63 @@ TEST(kdtree, unsigned_vs_bruteforce)
         integral_kd_vs_bruteforce_test<uint16_t, int64_t, L2_Simple_Adaptor, false>(
             300, 5, 65535, seed);
 
-        // Full uint32_t range: exercises the midpoint computation in
-        // middleSplit_(), which overflows if done in ElementType.
+        // Full uint32_t and uint64_t ranges: exercise the span and midpoint
+        // computations in middleSplit_(), which overflow if done in
+        // ElementType, and the metric subtractions, which wrap around.
         integral_kd_vs_bruteforce_test<uint32_t, double, L2_Simple_Adaptor, false>(
-            300, 5, 4294967295u, seed);
+            300, 5, std::numeric_limits<uint32_t>::max(), seed);
+        integral_kd_vs_bruteforce_test<uint64_t, double, L2_Simple_Adaptor, false>(
+            300, 5, std::numeric_limits<uint64_t>::max(), seed);
     }
+}
+
+TEST(kdtree, signed_extreme_range)
+{
+    // Coordinates spanning nearly the whole int32_t range: computing spans,
+    // spreads or the split midpoint in ElementType overflows (UB), so they
+    // must be evaluated in the wider DistanceType.
+    using cloud_t   = PointCloud<int32_t>;
+    using adaptor_t = L2_Simple_Adaptor<int32_t, cloud_t, double>;
+    using kdtree_t  = KDTreeSingleIndexAdaptor<adaptor_t, cloud_t, 3 /* dim */>;
+
+    const int32_t lo = std::numeric_limits<int32_t>::min();
+    const int32_t hi = std::numeric_limits<int32_t>::max();
+
+    std::mt19937_64                        rng(99);
+    std::uniform_int_distribution<int32_t> dis(lo, hi);
+
+    cloud_t cloud;
+    cloud.pts.resize(400);
+    for (auto& p : cloud.pts)
+    {
+        p.x = dis(rng);
+        p.y = dis(rng);
+        p.z = dis(rng);
+    }
+    // Force the bounding box to actually span the full range:
+    cloud.pts[0] = {lo, lo, lo};
+    cloud.pts[1] = {hi, hi, hi};
+
+    kdtree_t index(3 /*dim*/, cloud, KDTreeSingleIndexAdaptorParams(10));
+
+    const int32_t query_pt[3] = {0, 1000, -1000};
+    size_t        ret_index   = 0;
+    double        out_dist    = -1;
+
+    nanoflann::KNNResultSet<double> resultSet(1);
+    resultSet.init(&ret_index, &out_dist);
+    ASSERT_TRUE(index.findNeighbors(resultSet, &query_pt[0]));
+
+    double bf_best = std::numeric_limits<double>::max();
+    for (const auto& p : cloud.pts)
+    {
+        const double dx = double(query_pt[0]) - double(p.x);
+        const double dy = double(query_pt[1]) - double(p.y);
+        const double dz = double(query_pt[2]) - double(p.z);
+        bf_best         = std::min(bf_best, dx * dx + dy * dy + dz * dz);
+    }
+
+    EXPECT_EQ(out_dist, bf_best);
 }
 
 TEST(kdtree, unsigned_radius_search)
@@ -299,19 +351,31 @@ TEST(kdtree, unsigned_radius_search)
     std::vector<nanoflann::ResultItem<typename kdtree_t::IndexType, int32_t>> matches;
     const size_t nFound = index.radiusSearch(&query_pt[0], radius, matches);
 
-    // RadiusResultSet::addPoint keeps a point only if dist < radius (strict):
-    size_t bf_count = 0;
-    for (const auto& p : cloud.pts)
+    const auto sq_dist = [&](const size_t i) -> int32_t
     {
-        const int32_t dx = int32_t(query_pt[0]) - int32_t(p.x);
-        const int32_t dy = int32_t(query_pt[1]) - int32_t(p.y);
-        const int32_t dz = int32_t(query_pt[2]) - int32_t(p.z);
-        if (dx * dx + dy * dy + dz * dz < radius) bf_count++;
+        const int32_t dx = int32_t(query_pt[0]) - int32_t(cloud.pts[i].x);
+        const int32_t dy = int32_t(query_pt[1]) - int32_t(cloud.pts[i].y);
+        const int32_t dz = int32_t(query_pt[2]) - int32_t(cloud.pts[i].z);
+        return dx * dx + dy * dy + dz * dz;
+    };
+
+    // RadiusResultSet::addPoint keeps a point only if dist < radius (strict):
+    std::set<kdtree_t::IndexType> expected;
+    for (size_t i = 0; i < cloud.pts.size(); i++)
+        if (sq_dist(i) < radius) expected.insert(static_cast<kdtree_t::IndexType>(i));
+
+    // Compare the actual membership, not just the count. The results are not
+    // requested sorted, so compare them as a set:
+    std::set<kdtree_t::IndexType> found;
+    for (const auto& m : matches)
+    {
+        found.insert(m.first);
+        EXPECT_EQ(m.second, sq_dist(m.first));
     }
 
-    EXPECT_GT(bf_count, 0u);
-    EXPECT_EQ(nFound, bf_count);
-    EXPECT_EQ(matches.size(), bf_count);
+    EXPECT_GT(expected.size(), 0u);
+    EXPECT_EQ(nFound, expected.size());
+    EXPECT_TRUE(found == expected);
 }
 
 TEST(kdtree, unsigned_same_points)
