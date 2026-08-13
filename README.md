@@ -118,6 +118,22 @@ Refer to the examples below or to the C++ API of [nanoflann::KDTreeSingleIndexAd
     * Can be used to receive a callback for each point found in range. This may be more efficient in some situations instead of building a huge vector of pairs with the results.
     * [nanoflann::KDTreeSingleIndexAdaptor<>](https://jlblancoc.github.io/nanoflann/classnanoflann_1_1KDTreeSingleIndexAdaptor.html)`::findWithinBox()` [New in 1.8.0]: Optimized search within a given axis-aligned bound box.
   * Working with 2D and 3D point clouds or N-dimensional data sets.
+  * Working with integral element types, including unsigned ones. Since
+    `_DistanceType` defaults to the element type and must be **signed**, an
+    unsigned element type requires passing it explicitly, wide enough for the
+    distances of the actual coordinate range, e.g.
+    `nanoflann::L2_Simple_Adaptor<uint8_t, MyCloud, int32_t>`. To use it
+    through the `nanoflann::metric_*` tags, define your own tag:
+    ```cpp
+    struct my_metric_L2 : public nanoflann::Metric
+    {
+        template <class T, class DataSource, typename IndexType = size_t>
+        struct traits
+        {
+            using distance_t = nanoflann::L2_Simple_Adaptor<T, DataSource, int32_t, IndexType>;
+        };
+    };
+    ```
   * Working directly with `Eigen::Matrix<>` classes (matrices and vectors-of-vectors).
   * Working with dynamic point clouds without a need to rebuild entire kd-tree index. Two options:
     * `nanoflann::KDTreeSingleIndexDynamicAdaptor<>`: the Bentley–Saxe "logarithmic forest" of static sub-trees.
